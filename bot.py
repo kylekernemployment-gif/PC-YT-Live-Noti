@@ -51,12 +51,12 @@ async def check_live():
             embed = discord.Embed(
                 title=info["title"],
                 url=info["url"],
-                description="🔴 @everyone Players Choice is LIVE! Click to watch.",
+                description="🔴 We're live on YouTube! Come watch!",
                 color=0xFF0000
             )
             embed.set_image(url=info["thumbnail"])
             embed.set_footer(text="Click the title to watch!")
-            await channel.send(embed=embed)
+            await channel.send(content="@everyone", embed=embed)
             already_notified = True
         elif not info:
             if already_notified:
