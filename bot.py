@@ -15,7 +15,17 @@ CHECK_INTERVAL = 60
 intents = discord.Intents.default()
 client = discord.Client(intents=intents)
 
-already_notified = False
+def load_notified():
+    if os.path.exists('notified.txt'):
+        with open('notified.txt', 'r') as f:
+            return f.read().strip() == 'True'
+    return False
+
+def save_notified(value):
+    with open('notified.txt', 'w') as f:
+        f.write(str(value))
+
+already_notified = load_notified()
 
 def get_live_info():
     url = "https://www.googleapis.com/youtube/v3/search"
@@ -58,13 +68,16 @@ async def check_live():
             embed.set_footer(text="Click the title to watch!")
             await channel.send(content="@everyone", embed=embed)
             already_notified = True
+            save_notified(True)
         elif not info:
             if already_notified:
                 print("Stream ended, cooling down...")
                 already_notified = False
+                save_notified(False)
                 await asyncio.sleep(300)
             else:
                 already_notified = False
+                save_notified(False)
         await asyncio.sleep(CHECK_INTERVAL)
 
 @client.event
