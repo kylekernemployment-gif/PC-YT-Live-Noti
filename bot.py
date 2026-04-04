@@ -15,17 +15,8 @@ CHECK_INTERVAL = 60
 intents = discord.Intents.default()
 client = discord.Client(intents=intents)
 
-def load_notified():
-    if os.path.exists('notified.txt'):
-        with open('notified.txt', 'r') as f:
-            return f.read().strip() == 'True'
-    return False
-
-def save_notified(value):
-    with open('notified.txt', 'w') as f:
-        f.write(str(value))
-
-already_notified = load_notified()
+already_notified = False
+was_live_on_startup = False
 
 def get_live_info():
     url = "https://www.googleapis.com/youtube/v3/search"
@@ -36,54 +27,72 @@ def get_live_info():
         "eventType": "live",
         "key": YOUTUBE_API_KEY
     }
-    response = requests.get(url, params=params)
-    data = response.json()
-    items = data.get("items", [])
-    print(f"Live check: {len(items)} stream(s) found")
-    if items:
-        item = items[0]
-        video_id = item["id"]["videoId"]
-        title = item["snippet"]["title"]
-        thumbnail = item["snippet"]["thumbnails"]["high"]["url"]
-        video_url = f"https://www.youtube.com/watch?v={video_id}"
-        return {"title": title, "thumbnail": thumbnail, "url": video_url}
+    try:
+        response = requests.get(url, params=params, timeout=10)
+        data = response.json()
+        items = data.get("items", [])
+        print(f"Live check: {len(items)} stream(s) found")
+        if items:
+            item = items[0]
+            video_id = item["id"]["videoId"]
+            title = item["snippet"]["title"]
+            thumbnail = item["snippet"]["thumbnails"]["high"]["url"]
+            video_url = f"https://www.youtube.com/watch?v={video_id}"
+            return {"title": title, "thumbnail": thumbnail, "url": video_url}
+    except Exception as e:
+        print(f"Error checking live status: {e}")
     return None
 
 async def check_live():
     await client.wait_until_ready()
-    global already_notified
+    global already_notified, was_live_on_startup
+
     channel = client.get_channel(CHANNEL_ID)
     print(f"Discord channel found: {channel}")
+
+    startup_check = get_live_info()
+    if startup_check:
+        print("Was already live on startup, skipping notification.")
+        was_live_on_startup = True
+        already_notified = True
+
     while not client.is_closed():
-        info = get_live_info()
-        print(f"Is live: {info is not None} | Already notified: {already_notified}")
-        if info and not already_notified:
-            embed = discord.Embed(
-                title=info["title"],
-                url=info["url"],
-                description="🔴 We're live on YouTube! Come watch!",
-                color=0xFF0000
-            )
-            embed.set_image(url=info["thumbnail"])
-            embed.set_footer(text="Click the title to watch!")
-            await channel.send(content="@everyone", embed=embed)
-            already_notified = True
-            save_notified(True)
-        elif not info:
-            if already_notified:
-                print("Stream ended, cooling down...")
+        try:
+            info = get_live_info()
+            print(f"Is live: {info is not None} | Already notified: {already_notified}")
+            if info and not already_notified:
+                embed = discord.Embed(
+                    title=info["title"],
+                    url=info["url"],
+                    description="🔴 We're live on YouTube! Come watch!",
+                    color=0xFF0000
+                )
+                embed.set_image(url=info["thumbnail"])
+                embed.set_footer(text="Click the title to watch!")
+                await channel.send(content="@everyone", embed=embed)
+                already_notified = True
+            elif not info:
+                if already_notified:
+                    print("Stream ended, cooling down...")
+                    await asyncio.sleep(300)
                 already_notified = False
-                save_notified(False)
-                await asyncio.sleep(300)
-            else:
-                already_notified = False
-                save_notified(False)
+                was_live_on_startup = False
+        except Exception as e:
+            print(f"Error in check_live loop: {e}")
         await asyncio.sleep(CHECK_INTERVAL)
 
 @client.event
 async def on_ready():
     print(f"Bot is online as {client.user}")
     client.loop.create_task(check_live())
+
+@client.event
+async def on_disconnect():
+    print("Bot disconnected, attempting to reconnect...")
+
+@client.event
+async def on_resumed():
+    print("Bot reconnected successfully!")
 
 class Handler(BaseHTTPRequestHandler):
     def do_GET(self):
@@ -104,4 +113,4 @@ def run_server():
     server.serve_forever()
 
 threading.Thread(target=run_server, daemon=True).start()
-client.run(DISCORD_TOKEN)
+client.run(DISCORD_TOKEN, reconnect=True)
