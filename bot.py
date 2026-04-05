@@ -16,7 +16,7 @@ intents = discord.Intents.default()
 client = discord.Client(intents=intents)
 
 already_notified = False
-was_live_on_startup = False
+loop_started = False
 
 def get_live_info():
     url = "https://www.googleapis.com/youtube/v3/search"
@@ -44,19 +44,16 @@ def get_live_info():
     return None
 
 async def check_live():
-    await client.wait_until_ready()
-    global already_notified, was_live_on_startup
-
+    global already_notified
     channel = client.get_channel(CHANNEL_ID)
     print(f"Discord channel found: {channel}")
 
     startup_check = get_live_info()
     if startup_check:
         print("Was already live on startup, skipping notification.")
-        was_live_on_startup = True
         already_notified = True
 
-    while not client.is_closed():
+    while True:
         try:
             info = get_live_info()
             print(f"Is live: {info is not None} | Already notified: {already_notified}")
@@ -76,15 +73,25 @@ async def check_live():
                     print("Stream ended, cooling down...")
                     await asyncio.sleep(300)
                 already_notified = False
-                was_live_on_startup = False
         except Exception as e:
             print(f"Error in check_live loop: {e}")
         await asyncio.sleep(CHECK_INTERVAL)
 
+async def watchdog():
+    await client.wait_until_ready()
+    global loop_started
+    while True:
+        if not loop_started:
+            print("Watchdog: starting check_live loop...")
+            loop_started = True
+            client.loop.create_task(check_live())
+        await asyncio.sleep(300)
+        print("Watchdog: still alive")
+
 @client.event
 async def on_ready():
     print(f"Bot is online as {client.user}")
-    client.loop.create_task(check_live())
+    client.loop.create_task(watchdog())
 
 @client.event
 async def on_disconnect():
