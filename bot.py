@@ -3,6 +3,7 @@ import requests
 import asyncio
 import os
 import threading
+import xml.etree.ElementTree as ET
 from http.server import HTTPServer, BaseHTTPRequestHandler
 
 DISCORD_TOKEN = os.environ['DISCORD_TOKEN']
@@ -10,49 +11,87 @@ CHANNEL_ID = int(os.environ['CHANNEL_ID'])
 YOUTUBE_API_KEY = os.environ['YOUTUBE_API_KEY']
 YOUTUBE_CHANNEL_ID = os.environ['YOUTUBE_CHANNEL_ID']
 
-CHECK_INTERVAL = 900
+RSS_URL = f"https://www.youtube.com/feeds/videos.xml?channel_id={YOUTUBE_CHANNEL_ID}"
+RSS_CHECK_INTERVAL = 300  # check RSS every 5 min (free, no quota)
 
 intents = discord.Intents.default()
 client = discord.Client(intents=intents)
 
-already_notified = False
+already_notified_id = None  # track by video ID so restarts don't double-notify
 check_live_task = None
 
 
-def get_live_info():
-    url = "https://www.googleapis.com/youtube/v3/search"
-    params = {
-        "part": "snippet",
-        "channelId": YOUTUBE_CHANNEL_ID,
-        "type": "video",
-        "eventType": "live",
-        "key": YOUTUBE_API_KEY
-    }
+def get_latest_video_id():
+    """Fetch the most recent video ID from the RSS feed. Free, no API quota."""
     try:
-        response = requests.get(url, params=params, timeout=10)
-        data = response.json()
-        items = data.get("items", [])
-        print(f"Live check: {len(items)} stream(s) found")
-        if items:
-            item = items[0]
-            video_id = item["id"]["videoId"]
-            title = item["snippet"]["title"]
-            thumbnail = item["snippet"]["thumbnails"]["high"]["url"]
-            video_url = f"https://www.youtube.com/watch?v={video_id}"
-            return {"title": title, "thumbnail": thumbnail, "url": video_url}
+        resp = requests.get(RSS_URL, timeout=10)
+        root = ET.fromstring(resp.content)
+        ns = {
+            'atom': 'http://www.w3.org/2005/Atom',
+            'yt': 'http://www.youtube.com/xml/schemas/2015',
+        }
+        entry = root.find('atom:entry', ns)
+        if entry is not None:
+            video_id = entry.find('yt:videoId', ns)
+            if video_id is not None:
+                return video_id.text
     except Exception as e:
-        print(f"Error checking live status: {e}")
+        print(f"Error fetching RSS: {e}")
+    return None
+
+
+def is_video_live(video_id):
+    """
+    Check if a specific video is currently live.
+    Uses videos.list which costs only 1 API unit (vs 100 for search.list).
+    """
+    try:
+        url = "https://www.googleapis.com/youtube/v3/videos"
+        params = {
+            "part": "snippet,liveStreamingDetails",
+            "id": video_id,
+            "key": YOUTUBE_API_KEY
+        }
+        resp = requests.get(url, params=params, timeout=10)
+        data = resp.json()
+        items = data.get("items", [])
+        if not items:
+            return None
+        item = items[0]
+        snippet = item.get("snippet", {})
+        live_details = item.get("liveStreamingDetails", {})
+
+        # Must be a live broadcast that has started but not ended
+        if snippet.get("liveBroadcastContent") != "live":
+            return None
+        if not live_details.get("actualStartTime"):
+            return None
+        if live_details.get("actualEndTime"):
+            return None  # already ended
+
+        title = snippet.get("title", "")
+        thumbnail = snippet.get("thumbnails", {}).get("high", {}).get("url", "")
+        video_url = f"https://www.youtube.com/watch?v={video_id}"
+        return {"title": title, "thumbnail": thumbnail, "url": video_url}
+    except Exception as e:
+        print(f"Error checking video live status: {e}")
     return None
 
 
 async def check_live():
-    global already_notified
+    global already_notified_id
     print("check_live loop starting...")
 
-    startup_check = get_live_info()
-    if startup_check:
-        print("Was already live on startup, skipping notification.")
-        already_notified = True
+    # On startup, record the latest video ID so we don't re-notify for it
+    latest = get_latest_video_id()
+    if latest:
+        live_info = is_video_live(latest)
+        if live_info:
+            print(f"Already live on startup ({latest}), skipping notification.")
+            already_notified_id = latest
+        else:
+            print(f"Latest video on startup: {latest} (not live)")
+            already_notified_id = latest  # don't notify for pre-existing videos either
 
     while True:
         try:
@@ -62,31 +101,32 @@ async def check_live():
                 await asyncio.sleep(10)
                 continue
 
-            info = get_live_info()
-            print(f"Is live: {info is not None} | Already notified: {already_notified}")
+            video_id = get_latest_video_id()
+            print(f"RSS latest video: {video_id} | Last notified: {already_notified_id}")
 
-            if info and not already_notified:
-                embed = discord.Embed(
-                    title=info["title"],
-                    url=info["url"],
-                    description="🔴 We're live on YouTube! Come watch!",
-                    color=0xFF0000
-                )
-                embed.set_image(url=info["thumbnail"])
-                embed.set_footer(text="Click the title to watch!")
-                await channel.send(content="@everyone", embed=embed)
-                already_notified = True
-                print("Notification sent!")
-            elif not info:
-                if already_notified:
-                    print("Stream ended, cooling down...")
-                    await asyncio.sleep(300)
-                already_notified = False
+            if video_id and video_id != already_notified_id:
+                # New video appeared — check if it's a live stream (costs 1 API unit)
+                info = is_video_live(video_id)
+                if info:
+                    embed = discord.Embed(
+                        title=info["title"],
+                        url=info["url"],
+                        description="🔴 We're live on YouTube! Come watch!",
+                        color=0xFF0000
+                    )
+                    embed.set_image(url=info["thumbnail"])
+                    embed.set_footer(text="Click the title to watch!")
+                    await channel.send(content="@everyone", embed=embed)
+                    already_notified_id = video_id
+                    print(f"Notification sent for {video_id}!")
+                else:
+                    print(f"New video {video_id} is not a live stream, skipping.")
+                    already_notified_id = video_id  # still update so we don't recheck it
 
         except Exception as e:
             print(f"Error in check_live loop: {e}")
 
-        await asyncio.sleep(CHECK_INTERVAL)
+        await asyncio.sleep(RSS_CHECK_INTERVAL)
 
 
 async def watchdog():
