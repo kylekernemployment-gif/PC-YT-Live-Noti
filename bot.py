@@ -10,7 +10,7 @@ CHANNEL_ID = int(os.environ['CHANNEL_ID'])
 YOUTUBE_API_KEY = os.environ['YOUTUBE_API_KEY']
 YOUTUBE_CHANNEL_ID = os.environ['YOUTUBE_CHANNEL_ID']
 
-CHECK_INTERVAL = 60
+CHECK_INTERVAL = 900
 
 intents = discord.Intents.default()
 client = discord.Client(intents=intents)
