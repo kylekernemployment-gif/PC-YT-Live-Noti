@@ -23,7 +23,8 @@ check_live_task = None
 
 def get_latest_video_id():
     try:
-        resp = requests.get(RSS_URL, timeout=10)
+        headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"}
+        resp = requests.get(RSS_URL, headers=headers, timeout=10)
         root = ET.fromstring(resp.content)
         ns = {
             'atom': 'http://www.w3.org/2005/Atom',
