@@ -20,11 +20,12 @@ client = discord.Client(intents=intents)
 last_seen_video_id = None
 check_live_task = None
 
+HEADERS = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"}
+
 
 def get_latest_video_id():
     try:
-        headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"}
-        resp = requests.get(RSS_URL, headers=headers, timeout=10)
+        resp = requests.get(RSS_URL, headers=HEADERS, timeout=10)
         root = ET.fromstring(resp.content)
         ns = {
             'atom': 'http://www.w3.org/2005/Atom',
@@ -40,7 +41,14 @@ def get_latest_video_id():
     return None
 
 
-def is_video_live(video_id):
+def get_video_status(video_id):
+    """
+    Returns:
+      {"status": "live", "title": ..., "thumbnail": ..., "url": ...}  if live
+      {"status": "upcoming"}  if scheduled but not started
+      {"status": "none"}      if regular video
+      None                    on API error
+    """
     try:
         resp = requests.get(
             "https://www.googleapis.com/youtube/v3/videos",
@@ -54,23 +62,23 @@ def is_video_live(video_id):
         data = resp.json()
         items = data.get("items", [])
         if not items:
-            return None
+            return {"status": "none"}
         item = items[0]
         snippet = item.get("snippet", {})
         live = item.get("liveStreamingDetails", {})
+        broadcast = snippet.get("liveBroadcastContent", "none")
 
-        if snippet.get("liveBroadcastContent") != "live":
-            return None
-        if not live.get("actualStartTime"):
-            return None
-        if live.get("actualEndTime"):
-            return None
-
-        return {
-            "title": snippet.get("title", ""),
-            "thumbnail": snippet.get("thumbnails", {}).get("high", {}).get("url", ""),
-            "url": f"https://www.youtube.com/watch?v={video_id}"
-        }
+        if broadcast == "live" and live.get("actualStartTime") and not live.get("actualEndTime"):
+            return {
+                "status": "live",
+                "title": snippet.get("title", ""),
+                "thumbnail": snippet.get("thumbnails", {}).get("high", {}).get("url", ""),
+                "url": f"https://www.youtube.com/watch?v={video_id}"
+            }
+        elif broadcast == "upcoming":
+            return {"status": "upcoming"}
+        else:
+            return {"status": "none"}
     except Exception as e:
         print(f"[API] Error: {e}", flush=True)
     return None
@@ -92,24 +100,41 @@ async def check_live():
                 continue
 
             video_id = get_latest_video_id()
+
+            if video_id is None:
+                # RSS failed — retry once after 30s before waiting full interval
+                print("[Bot] RSS failed, retrying in 30s...", flush=True)
+                await asyncio.sleep(30)
+                video_id = get_latest_video_id()
+
             print(f"[Bot] Latest: {video_id} | Last seen: {last_seen_video_id}", flush=True)
 
             if video_id and video_id != last_seen_video_id:
-                info = is_video_live(video_id)
-                if info:
+                result = get_video_status(video_id)
+                print(f"[Bot] Video {video_id} status: {result}", flush=True)
+
+                if result is None:
+                    # API error — don't advance last_seen, retry next cycle
+                    print("[Bot] API error, will retry next cycle.", flush=True)
+                elif result["status"] == "live":
                     embed = discord.Embed(
-                        title=info["title"],
-                        url=info["url"],
+                        title=result["title"],
+                        url=result["url"],
                         description="🔴 We're live on YouTube! Come watch!",
                         color=0xFF0000
                     )
-                    embed.set_image(url=info["thumbnail"])
+                    embed.set_image(url=result["thumbnail"])
                     embed.set_footer(text="Click the title to watch!")
                     await channel.send(content="@everyone", embed=embed)
                     print(f"[Bot] Notification sent for {video_id}!", flush=True)
+                    last_seen_video_id = video_id
+                elif result["status"] == "upcoming":
+                    # Scheduled stream not yet live — keep checking, don't advance
+                    print(f"[Bot] {video_id} is upcoming, will keep checking.", flush=True)
                 else:
-                    print(f"[Bot] {video_id} is not live, skipping.", flush=True)
-                last_seen_video_id = video_id
+                    # Regular video — skip it
+                    print(f"[Bot] {video_id} is a regular video, skipping.", flush=True)
+                    last_seen_video_id = video_id
 
         except Exception as e:
             print(f"[Bot] Error in loop: {e}", flush=True)
