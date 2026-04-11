@@ -42,13 +42,6 @@ def get_latest_video_id():
 
 
 def get_video_status(video_id):
-    """
-    Returns:
-      {"status": "live", "title": ..., "thumbnail": ..., "url": ...}  if live
-      {"status": "upcoming"}  if scheduled but not started
-      {"status": "none"}      if regular video
-      None                    on API error
-    """
     try:
         resp = requests.get(
             "https://www.googleapis.com/youtube/v3/videos",
@@ -84,6 +77,35 @@ def get_video_status(video_id):
     return None
 
 
+async def send_notification(channel, result, video_id):
+    """Attempt to send the notification, retrying up to 5 times on rate limit."""
+    embed = discord.Embed(
+        title=result["title"],
+        url=result["url"],
+        description="🔴 We're live on YouTube! Come watch!",
+        color=0xFF0000
+    )
+    embed.set_image(url=result["thumbnail"])
+    embed.set_footer(text="Click the title to watch!")
+
+    for attempt in range(5):
+        try:
+            await channel.send(content="@everyone", embed=embed)
+            print(f"[Bot] Notification sent for {video_id}!", flush=True)
+            return True
+        except discord.HTTPException as e:
+            wait = 30 * (attempt + 1)
+            print(f"[Bot] Send failed (attempt {attempt + 1}/5): {e.status} — retrying in {wait}s...", flush=True)
+            await asyncio.sleep(wait)
+        except Exception as e:
+            wait = 30 * (attempt + 1)
+            print(f"[Bot] Send error (attempt {attempt + 1}/5): {e} — retrying in {wait}s...", flush=True)
+            await asyncio.sleep(wait)
+
+    print(f"[Bot] All send attempts failed for {video_id}.", flush=True)
+    return False
+
+
 async def check_live():
     global last_seen_video_id
     print("[Bot] check_live loop starting...", flush=True)
@@ -102,7 +124,6 @@ async def check_live():
             video_id = get_latest_video_id()
 
             if video_id is None:
-                # RSS failed — retry once after 30s before waiting full interval
                 print("[Bot] RSS failed, retrying in 30s...", flush=True)
                 await asyncio.sleep(30)
                 video_id = get_latest_video_id()
@@ -114,25 +135,14 @@ async def check_live():
                 print(f"[Bot] Video {video_id} status: {result}", flush=True)
 
                 if result is None:
-                    # API error — don't advance last_seen, retry next cycle
                     print("[Bot] API error, will retry next cycle.", flush=True)
                 elif result["status"] == "live":
-                    embed = discord.Embed(
-                        title=result["title"],
-                        url=result["url"],
-                        description="🔴 We're live on YouTube! Come watch!",
-                        color=0xFF0000
-                    )
-                    embed.set_image(url=result["thumbnail"])
-                    embed.set_footer(text="Click the title to watch!")
-                    await channel.send(content="@everyone", embed=embed)
-                    print(f"[Bot] Notification sent for {video_id}!", flush=True)
-                    last_seen_video_id = video_id
+                    sent = await send_notification(channel, result, video_id)
+                    if sent:
+                        last_seen_video_id = video_id
                 elif result["status"] == "upcoming":
-                    # Scheduled stream not yet live — keep checking, don't advance
                     print(f"[Bot] {video_id} is upcoming, will keep checking.", flush=True)
                 else:
-                    # Regular video — skip it
                     print(f"[Bot] {video_id} is a regular video, skipping.", flush=True)
                     last_seen_video_id = video_id
 
